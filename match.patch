@@ -1,0 +1,1036 @@
+diff --git a/nlprompt/__init__.py b/nlprompt/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/nlprompt/configs/otpclip_caltech101.yaml b/nlprompt/configs/otpclip_caltech101.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..351d8a51784eefc6b364980ef570214ac3ec8c04
+--- /dev/null
++++ b/nlprompt/configs/otpclip_caltech101.yaml
+@@ -0,0 +1,25 @@
++_BASE_: "otpclip_default.yaml"
++
++DATASET:
++  NAME: "Caltech101"
++  ROOT: "/data/caltech101"
++
++INPUT:
++  SIZE: (224, 224)
++
++DATALOADER:
++  TRAIN_X:
++    BATCH_SIZE: 64
++  TEST:
++    BATCH_SIZE: 64
++
++OPTIM:
++  NAME: "adamw"
++  LR: 2.0e-5
++  WEIGHT_DECAY: 0.02
++  MAX_EPOCH: 50
++  WARMUP_EPOCH: 2
++
++TRAINER:
++  OTPCLIP:
++    attr_bank: "alpha.json"
+diff --git a/nlprompt/configs/otpclip_default.yaml b/nlprompt/configs/otpclip_default.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9589ec73e14ce4bfdcd3a68ab40869ed12bba70
+--- /dev/null
++++ b/nlprompt/configs/otpclip_default.yaml
+@@ -0,0 +1,37 @@
++TRAINER:
++  NAME: "OTPCLIP"
++  OTPCLIP:
++    attr_bank: "alpha.json"
++    tau: 0.01
++    robust: "mae"
++    PROMPT:
++      n_ctx: 16
++      sparsity_lambda: 1.0e-3
++      group_lambda: 5.0e-4
++      orth_lambda: 1.0e-2
++      norm: "row_l1"
++    PROMPT_NOISE:
++      granularity: "token"
++      s_init: 0.05
++      t_init: 0.02
++      kl_lambda: 1.0e-3
++      anneal:
++        start_epoch: 0
++        end_epoch: 15
++        cap_sigma: 0.08
++    MTA:
++      h: 0.7
++      T: 7
++      lam: 0.1
++      entropy: true
++      train_grad: false
++    OT:
++      sinkhorn_iter: 30
++      tau_clean: 0.55
++      temperature: 0.07
++      epsilon: 0.1
++    LOSS_WEIGHTS:
++      ce: 1.0
++      robust: 0.5
++      ot: 0.2
++      reg: 1.0
+diff --git a/nlprompt/datasets/__init__.py b/nlprompt/datasets/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..80bac25a0c98e5ebb1da7779532c16ee5d3a75a5
+--- /dev/null
++++ b/nlprompt/datasets/__init__.py
+@@ -0,0 +1,8 @@
++"""Datasets utilities for OTP-CLIP framework."""
++
++from .attr_bank import load_attr_bank, build_text_templates
++
++__all__ = [
++    "load_attr_bank",
++    "build_text_templates",
++]
+diff --git a/nlprompt/datasets/attr_bank.py b/nlprompt/datasets/attr_bank.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4d45f47637b04396cc1829526bcae9011abf153
+--- /dev/null
++++ b/nlprompt/datasets/attr_bank.py
+@@ -0,0 +1,108 @@
++"""Attribute bank utilities for OTP-CLIP."""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Dict, Iterable, List, Mapping, Sequence
++
++import yaml
++
++
++def _read_json_or_yaml(path: Path) -> Mapping:
++    """Read a JSON or YAML file into a mapping."""
++
++    with path.open("r", encoding="utf-8") as handle:
++        if path.suffix.lower() in {".yaml", ".yml"}:
++            return yaml.safe_load(handle)
++        return json.load(handle)
++
++
++def load_attr_bank(path: str | Path) -> Dict[str, List[str]]:
++    """Load the attribute bank from *path*.
++
++    The file is expected to contain a mapping from class names to lists of
++    textual attributes. JSON and YAML formats are supported.
++    """
++
++    path = Path(path)
++    if not path.exists():
++        raise FileNotFoundError(f"Attribute bank file not found: {path}")
++
++    data = _read_json_or_yaml(path)
++    if not isinstance(data, Mapping):
++        raise ValueError("Attribute bank must be a mapping from class to attributes")
++
++    result: Dict[str, List[str]] = {}
++    for cls, attrs in data.items():
++        if attrs is None:
++            result[str(cls)] = []
++            continue
++        if isinstance(attrs, str):
++            attrs = [attrs]
++        if not isinstance(attrs, Iterable):
++            raise ValueError(f"Attributes for {cls!r} must be iterable")
++        clean_attrs: List[str] = []
++        for attr in attrs:
++            if attr is None:
++                continue
++            clean_attrs.append(str(attr).strip())
++        result[str(cls)] = [a for a in clean_attrs if a]
++    return result
++
++
++def build_text_templates(
++    class_name: str,
++    attrs: Sequence[str],
++    config: Mapping | None = None,
++) -> List[str]:
++    """Create text templates for the given class and attributes.
++
++    Parameters
++    ----------
++    class_name:
++        Name of the class, typically matching the dataset label.
++    attrs:
++        Sequence of attribute strings.
++    config:
++        Optional configuration mapping that can specify the template
++        construction strategy. Supported keys:
++
++        ``use_attributes`` (bool, default: True)
++            Whether to include attribute sentences.
++        ``class_template`` (str, default: "a photo of a {class}.")
++            Template applied to the class name.
++        ``attr_template`` (str, default: "it is {attr}.")
++            Template applied to each attribute when ``use_attributes`` is
++            enabled.
++        ``joiner`` (str, default: " ")
++            String used to join the class template with attribute sentences.
++    """
++
++    if config is None:
++        config = {}
++
++    use_attrs = bool(config.get("use_attributes", True))
++    class_template = config.get("class_template", "a photo of a {class}.")
++    attr_template = config.get("attr_template", "it is {attr}.")
++    joiner = config.get("joiner", " ")
++
++    templates: List[str] = []
++    class_prompt = class_template.format(class_name=class_name)
++    templates.append(class_prompt)
++
++    if use_attrs and attrs:
++        for attr in attrs:
++            templates.append(
++                joiner.join(
++                    [
++                        class_prompt,
++                        attr_template.format(attr=attr, class_name=class_name),
++                    ]
++                )
++            )
++
++    return templates
++
++
++__all__ = ["load_attr_bank", "build_text_templates"]
+diff --git a/nlprompt/losses/__init__.py b/nlprompt/losses/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7908852192e207dd4b15a15777895c02a630d926
+--- /dev/null
++++ b/nlprompt/losses/__init__.py
+@@ -0,0 +1,5 @@
++"""Loss helpers for OTP-CLIP."""
++
++from .robust_losses import compose_losses
++
++__all__ = ["compose_losses"]
+diff --git a/nlprompt/losses/robust_losses.py b/nlprompt/losses/robust_losses.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c9fde0eda4046665a73c2580230e22abab6cf2fb
+--- /dev/null
++++ b/nlprompt/losses/robust_losses.py
+@@ -0,0 +1,65 @@
++"""Robust loss composition utilities."""
++
++from __future__ import annotations
++
++from typing import Dict, Optional, Sequence
++
++import torch
++import torch.nn.functional as F
++
++
++def mae_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
++    return torch.abs(F.log_softmax(logits, dim=-1) - F.one_hot(target, logits.size(-1)).float()).sum(dim=-1).mean()
++
++
++def gce_loss(logits: torch.Tensor, target: torch.Tensor, q: float = 0.7) -> torch.Tensor:
++    probs = F.softmax(logits, dim=-1)
++    y = F.one_hot(target, logits.size(-1)).float()
++    p = (probs * y).sum(dim=-1)
++    return (1.0 - p.pow(q)) / q
++
++
++def compose_losses(
++    logits: torch.Tensor,
++    labels: torch.Tensor,
++    clean_mask: torch.Tensor,
++    ot_loss: torch.Tensor,
++    loss_weights: Optional[Dict[str, float]] = None,
++    reg_terms: Optional[Sequence[torch.Tensor]] = None,
++    robust_type: str = "mae",
++) -> tuple[torch.Tensor, Dict[str, float]]:
++    loss_weights = loss_weights or {}
++    reg_terms = [term for term in (reg_terms or []) if term is not None]
++
++    ce = F.cross_entropy(logits[clean_mask], labels[clean_mask]) if clean_mask.any() else torch.tensor(0.0, device=logits.device)
++
++    robust = torch.tensor(0.0, device=logits.device)
++    noisy_mask = ~clean_mask
++    if noisy_mask.any():
++        if robust_type == "mae":
++            robust = mae_loss(logits[noisy_mask], labels[noisy_mask])
++        elif robust_type == "gce":
++            robust = gce_loss(logits[noisy_mask], labels[noisy_mask]).mean()
++        else:
++            raise ValueError(f"Unknown robust loss: {robust_type}")
++
++    reg_sum = torch.stack([r if r.ndim == 0 else r.sum() for r in reg_terms]).sum() if reg_terms else torch.tensor(0.0, device=logits.device)
++
++    loss = (
++        loss_weights.get("ce", 1.0) * ce
++        + loss_weights.get("robust", 0.5) * robust
++        + loss_weights.get("ot", 0.2) * ot_loss
++        + loss_weights.get("reg", 1.0) * reg_sum
++    )
++
++    metrics = {
++        "loss/ce": float(ce.detach().cpu()),
++        "loss/robust": float(robust.detach().cpu()),
++        "loss/ot": float(ot_loss.detach().cpu()),
++        "loss/reg": float(reg_sum.detach().cpu()),
++    }
++
++    return loss, metrics
++
++
++__all__ = ["compose_losses"]
+diff --git a/nlprompt/scripts/ablate_otpclip.sh b/nlprompt/scripts/ablate_otpclip.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..17dffba635ad4ae8c48ac82a4caa93c66f6ef7c3
+--- /dev/null
++++ b/nlprompt/scripts/ablate_otpclip.sh
+@@ -0,0 +1,14 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++BASE_CONFIG=${1:-"nlprompt/configs/otpclip_caltech101.yaml"}
++
++declare -a RUNS=(
++  ""
++  "TRAINER.OTPCLIP.robust gce"
++  "TRAINER.OTPCLIP.robust mae"
++)
++
++for run in "${RUNS[@]}"; do
++  python train.py --config-file "$BASE_CONFIG" $run
++done
+diff --git a/nlprompt/scripts/train_otpclip.sh b/nlprompt/scripts/train_otpclip.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..163af10c9dfa3d0de0b40965c39057da0d1e575a
+--- /dev/null
++++ b/nlprompt/scripts/train_otpclip.sh
+@@ -0,0 +1,38 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++CONFIG="nlprompt/configs/otpclip_caltech101.yaml"
++DATASET="caltech101"
++FEWSHOT=16
++ENABLE_MTA=true
++ENABLE_OT=true
++ROBUST="mae"
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --config)
++      CONFIG="$2"; shift 2 ;;
++    --dataset)
++      DATASET="$2"; shift 2 ;;
++    --few-shot)
++      FEWSHOT="$2"; shift 2 ;;
++    --enable-mta)
++      ENABLE_MTA=true; shift ;;
++    --disable-mta|--no-mta)
++      ENABLE_MTA=false; shift ;;
++    --enable-ot)
++      ENABLE_OT=true; shift ;;
++    --disable-ot|--no-ot)
++      ENABLE_OT=false; shift ;;
++    --robust)
++      ROBUST="$2"; shift 2 ;;
++    *)
++      echo "Unknown argument: $1" >&2
++      exit 1 ;;
++  esac
++done
++
++python train.py \
++  --config-file "$CONFIG" \
++  --dataset-config-file "configs/datasets/${DATASET}.yaml" \
++  TRAINER.OTPCLIP.robust "$ROBUST"
+diff --git a/nlprompt/trainers/__init__.py b/nlprompt/trainers/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a56cb1eb3843095c049652447a2b1ed2a36aab11
+--- /dev/null
++++ b/nlprompt/trainers/__init__.py
+@@ -0,0 +1,5 @@
++"""Trainer package for OTP-CLIP."""
++
++from .otpclip_trainer import OTPCLIPTrainer
++
++__all__ = ["OTPCLIPTrainer"]
+diff --git a/nlprompt/trainers/modules/__init__.py b/nlprompt/trainers/modules/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f4c31d314e696e7ee0a50eb9ea99a8ce84477596
+--- /dev/null
++++ b/nlprompt/trainers/modules/__init__.py
+@@ -0,0 +1,13 @@
++"""Modules used by the OTP-CLIP trainer."""
++
++from .oprompt import OPrompt
++from .prompt_noise import PromptNoise
++from .mta import MeanShiftAggregator
++from .ot import OTFilter
++
++__all__ = [
++    "OPrompt",
++    "PromptNoise",
++    "MeanShiftAggregator",
++    "OTFilter",
++]
+diff --git a/nlprompt/trainers/modules/mta.py b/nlprompt/trainers/modules/mta.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..72f9044c1d3358556f92f4afebc988ac1e1af00f
+--- /dev/null
++++ b/nlprompt/trainers/modules/mta.py
+@@ -0,0 +1,47 @@
++"""Mean-shift multi-view aggregation module."""
++
++from __future__ import annotations
++
++from typing import Dict, Tuple
++
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++
++class MeanShiftAggregator(nn.Module):
++    """Aggregates multi-view features using mean-shift style updates."""
++
++    def __init__(self, h: float = 0.7, T: int = 5, lam: float = 0.1, entropy: bool = True, train_grad: bool = False) -> None:
++        super().__init__()
++        self.h = h
++        self.T = T
++        self.lam = lam
++        self.entropy = entropy
++        self.train_grad = train_grad
++
++    def forward(self, feats: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
++        if feats.dim() != 3:
++            raise ValueError("Expected [B, V, D] input")
++        B, V, D = feats.shape
++        proto = feats.mean(dim=1)
++        weights = torch.full((B, V), 1.0 / V, device=feats.device, dtype=feats.dtype)
++
++        def _step(m: torch.Tensor, w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
++            diff = (feats - m.unsqueeze(1)).pow(2).sum(dim=-1)
++            logits = -diff / (2 * (self.h ** 2) * max(self.lam, 1e-6))
++            w = torch.softmax(logits, dim=-1)
++            m = torch.sum(feats * w.unsqueeze(-1), dim=1)
++            m = F.normalize(m, dim=-1)
++            return m, w
++
++        ctx = torch.enable_grad() if self.train_grad else torch.no_grad()
++        with ctx:
++            m = proto
++            w = weights
++            for _ in range(self.T):
++                m, w = _step(m, w)
++        return m, w
++
++
++__all__ = ["MeanShiftAggregator"]
+diff --git a/nlprompt/trainers/modules/oprompt.py b/nlprompt/trainers/modules/oprompt.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8371f68bc8403f925634a29100069761d37707cf
+--- /dev/null
++++ b/nlprompt/trainers/modules/oprompt.py
+@@ -0,0 +1,120 @@
++"""Learnable prompt aggregation with sparsity and orthogonality regularizers."""
++
++from __future__ import annotations
++
++from typing import Dict, Iterable, List, Mapping, Optional
++
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++
++class OPrompt(nn.Module):
++    """Attribute-aware prompt learner.
++
++    The module aggregates attribute embeddings for each class using
++    learnable weights while providing sparsity and orthogonality
++    regularisation terms that can be consumed by the trainer.
++    """
++
++    def __init__(
++        self,
++        n_ctx: int,
++        attr_embeddings: Mapping[str, torch.Tensor] | None = None,
++        sparsity_lambda: float = 0.0,
++        group_lambda: float = 0.0,
++        orth_lambda: float = 0.0,
++        norm: str | None = None,
++        device: Optional[torch.device] = None,
++    ) -> None:
++        super().__init__()
++        self.n_ctx = n_ctx
++        self.attr_embeddings = attr_embeddings
++        self.sparsity_lambda = sparsity_lambda
++        self.group_lambda = group_lambda
++        self.orth_lambda = orth_lambda
++        self.norm = norm
++        self.device = device
++
++        self.register_buffer("_reg_sparsity", torch.tensor(0.0))
++        self.register_buffer("_reg_orth", torch.tensor(0.0))
++        self.register_buffer("_reg_group", torch.tensor(0.0))
++
++        if attr_embeddings is not None:
++            self._build_parameters(attr_embeddings)
++        else:
++            self.W = None
++
++    def _build_parameters(self, attr_embeddings: Mapping[str, torch.Tensor]) -> None:
++        weights: List[torch.Tensor] = []
++        for _, emb in attr_embeddings.items():
++            n_attr = emb.shape[0]
++            w = torch.zeros((self.n_ctx, n_attr), dtype=emb.dtype, device=emb.device)
++            nn.init.normal_(w, std=0.02)
++            weights.append(w)
++        self.W = nn.ParameterList([nn.Parameter(w) for w in weights])
++
++    def attach_embeddings(self, attr_embeddings: Mapping[str, torch.Tensor]) -> None:
++        self.attr_embeddings = attr_embeddings
++        self._build_parameters(attr_embeddings)
++
++    def forward(self, attr_embeddings: Mapping[str, torch.Tensor]) -> torch.Tensor:
++        if self.W is None or len(self.W) != len(attr_embeddings):
++            self.attach_embeddings(attr_embeddings)
++
++        ctx_list: List[torch.Tensor] = []
++        reg_s = 0.0
++        reg_g = 0.0
++        reg_o = 0.0
++
++        for (cls_idx, (_, emb)), weight in zip(enumerate(attr_embeddings.items()), self.W):
++            if emb.ndim != 2:
++                raise ValueError("Attribute embeddings must have shape [n_attr, dim]")
++            logits = weight
++            if self.norm == "row_l1":
++                attn = torch.softmax(logits, dim=-1)
++            elif self.norm == "none" or self.norm is None:
++                attn = torch.softmax(logits, dim=-1)
++            else:
++                raise ValueError(f"Unsupported normalisation: {self.norm}")
++            ctx = attn @ emb
++            ctx_list.append(ctx.unsqueeze(0))
++
++            reg_s = reg_s + torch.sum(attn.abs())
++            reg_g = reg_g + torch.norm(attn, dim=-1).sum()
++
++        ctx_tensor = torch.stack(ctx_list, dim=0)
++
++        if ctx_tensor.ndim != 3:
++            raise RuntimeError("Context tensor must have shape [C, n_ctx, dim]")
++
++        if self.orth_lambda > 0:
++            c = ctx_tensor.shape[0]
++            flat = ctx_tensor.view(c, -1)
++            gram = F.normalize(flat, dim=-1) @ F.normalize(flat, dim=-1).t()
++            reg_o = (gram - torch.eye(c, device=gram.device, dtype=gram.dtype)).abs().mean()
++
++        self._reg_sparsity = reg_s.detach()
++        self._reg_group = reg_g.detach()
++        self._reg_orth = reg_o.detach()
++
++        self._last_reg = (
++            self.sparsity_lambda * reg_s
++            + self.group_lambda * reg_g
++            + self.orth_lambda * reg_o
++        )
++        return ctx_tensor
++
++    def regularization(self) -> torch.Tensor:
++        return getattr(self, "_last_reg", torch.tensor(0.0, device=self.W[0].device if self.W else None))
++
++    def reg_summary(self) -> Dict[str, float]:
++        device = self._reg_sparsity.device
++        return {
++            "prompt_sparsity": float(self._reg_sparsity.detach().cpu()),
++            "prompt_group": float(self._reg_group.detach().cpu()),
++            "prompt_orth": float(self._reg_orth.detach().cpu()),
++        }
++
++
++__all__ = ["OPrompt"]
+diff --git a/nlprompt/trainers/modules/ot.py b/nlprompt/trainers/modules/ot.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..92d55d744bbaf37b3fc852d74020072b7f8fad5d
+--- /dev/null
++++ b/nlprompt/trainers/modules/ot.py
+@@ -0,0 +1,43 @@
++"""Wrapper around Sinkhorn-based optimal transport sample filtering."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Optional, Tuple
++
++import torch
++
++
++def sinkhorn(logits: torch.Tensor, n_iter: int = 10, epsilon: float = 0.1) -> torch.Tensor:
++    P = torch.exp(logits / max(epsilon, 1e-6))
++    u = torch.ones(P.size(0), device=P.device, dtype=P.dtype)
++    v = torch.ones(P.size(1), device=P.device, dtype=P.dtype)
++    for _ in range(n_iter):
++        u = 1.0 / (P @ v)
++        v = 1.0 / (P.t() @ u)
++    return torch.diag(u) @ P @ torch.diag(v)
++
++
++@dataclass
++class OTConfig:
++    sinkhorn_iter: int = 20
++    tau_clean: float = 0.5
++    temperature: float = 0.07
++    epsilon: float = 0.1
++
++
++class OTFilter:
++    def __init__(self, cfg: Optional[OTConfig] = None) -> None:
++        self.cfg = cfg or OTConfig()
++
++    def forward(self, sim: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        P = sinkhorn(sim / self.cfg.temperature, self.cfg.sinkhorn_iter, self.cfg.epsilon)
++        conf, _ = P.max(dim=1)
++        clean_mask = conf >= self.cfg.tau_clean
++        ot_loss = -torch.log(conf + 1e-6).mean()
++        return clean_mask, conf, ot_loss
++
++    __call__ = forward
++
++
++__all__ = ["OTFilter", "OTConfig"]
+diff --git a/nlprompt/trainers/modules/prompt_noise.py b/nlprompt/trainers/modules/prompt_noise.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e0db88f7330242036321cdda043538285c083c34
+--- /dev/null
++++ b/nlprompt/trainers/modules/prompt_noise.py
+@@ -0,0 +1,78 @@
++"""Prompt-level Sparse Over-parameterisation noise module."""
++
++from __future__ import annotations
++
++from typing import Dict, Optional
++
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++
++class PromptNoise(nn.Module):
++    """Implements the (s^2 - t^2) noise parameterisation."""
++
++    def __init__(
++        self,
++        granularity: str = "token",
++        s_init: float = 0.05,
++        t_init: float = 0.02,
++        kl_lambda: float = 1e-3,
++        anneal: Optional[Dict[str, float]] = None,
++    ) -> None:
++        super().__init__()
++        self.granularity = granularity
++        self.kl_lambda = kl_lambda
++        self.anneal = anneal or {}
++        self.register_buffer("step", torch.tensor(0.0))
++        self.register_buffer("epoch", torch.tensor(0.0))
++        self.s_init = s_init
++        self.t_init = t_init
++        self.log_s2 = nn.Parameter(torch.tensor([s_init]).log())
++        self.log_t2 = nn.Parameter(torch.tensor([t_init]).log())
++        self.register_buffer("_last_reg", torch.tensor(0.0))
++        self.register_buffer("_last_sigma", torch.tensor(0.0))
++
++    def forward(self, ctx: torch.Tensor, epoch: Optional[int] = None) -> tuple[torch.Tensor, torch.Tensor]:
++        if epoch is not None:
++            self.epoch.fill_(float(epoch))
++        self.step += 1
++
++        sigma2 = self._sigma2(ctx)
++        noise = torch.randn_like(ctx) * torch.sqrt(sigma2)
++        ctx_tilde = ctx + noise
++
++        reg = self.kl_lambda * (self.log_s2.pow(2) + self.log_t2.pow(2))
++        self._last_reg = reg
++        self._last_sigma = sigma2.mean().detach()
++        return ctx_tilde, reg
++
++    def _sigma2(self, ctx: torch.Tensor) -> torch.Tensor:
++        softplus = torch.nn.functional.softplus
++        sigma2 = softplus(self.log_s2) - softplus(self.log_t2)
++        sigma2 = torch.clamp(sigma2, min=1e-6)
++
++        if self.granularity == "token":
++            sigma2 = sigma2.view(1, 1, 1)
++        elif self.granularity == "class":
++            sigma2 = sigma2.view(1, 1, 1)
++        elif self.granularity == "global":
++            sigma2 = sigma2.view(1, 1, 1)
++        else:
++            raise ValueError(f"Unknown granularity: {self.granularity}")
++
++        cap = self.anneal.get("cap_sigma")
++        if cap is not None:
++            sigma2 = torch.clamp(sigma2, max=cap)
++        return sigma2.expand_as(ctx)
++
++    def regularization(self) -> torch.Tensor:
++        return self._last_reg
++
++    def stats(self) -> Dict[str, float]:
++        return {
++            "prompt_noise_sigma": float(self._last_sigma.cpu()),
++        }
++
++
++__all__ = ["PromptNoise"]
+diff --git a/nlprompt/trainers/otpclip_trainer.py b/nlprompt/trainers/otpclip_trainer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d15466f3fcc2e4f1cb4ea9f1f2bc4e282382b9cb
+--- /dev/null
++++ b/nlprompt/trainers/otpclip_trainer.py
+@@ -0,0 +1,131 @@
++"""OTP-CLIP Trainer integrating SOP, MTA, and OT modules."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Dict, List, Mapping, Optional
++
++import torch
++import torch.nn.functional as F
++
++from dassl.engine import TrainerX
++
++from nlprompt.datasets import load_attr_bank
++from nlprompt.losses import compose_losses
++from nlprompt.trainers.modules import MeanShiftAggregator, OTFilter, OPrompt, PromptNoise
++from nlprompt.utils.metrics import MetricCollection, brier_score, expected_calibration_error, topk_accuracy
++
++
++@dataclass
++class OTPConfig:
++    attr_bank: str
++    prompt_cfg: Mapping
++    prompt_noise_cfg: Mapping
++    mta_cfg: Mapping
++    ot_cfg: Mapping
++    loss_weights: Mapping
++    temperature: float = 0.01
++    robust: str = "mae"
++
++
++class OTPCLIPTrainer(TrainerX):
++    def build_model(self):
++        super().build_model()
++        cfg = self.cfg.TRAINER
++        self.metric_collection = MetricCollection()
++
++        prompt_cfg = cfg.OTPCLIP.PROMPT
++        self.oprompt = OPrompt(
++            n_ctx=prompt_cfg.n_ctx,
++            sparsity_lambda=prompt_cfg.sparsity_lambda,
++            group_lambda=prompt_cfg.group_lambda,
++            orth_lambda=prompt_cfg.orth_lambda,
++            norm=prompt_cfg.norm,
++        ).to(self.device)
++
++        noise_cfg = cfg.OTPCLIP.PROMPT_NOISE
++        self.prompt_noise = PromptNoise(
++            granularity=noise_cfg.granularity,
++            s_init=noise_cfg.s_init,
++            t_init=noise_cfg.t_init,
++            kl_lambda=noise_cfg.kl_lambda,
++            anneal=dict(noise_cfg.anneal),
++        ).to(self.device)
++
++        mta_cfg = cfg.OTPCLIP.MTA
++        self.mta = MeanShiftAggregator(
++            h=mta_cfg.h,
++            T=mta_cfg.T,
++            lam=mta_cfg.lam,
++            entropy=mta_cfg.entropy,
++            train_grad=mta_cfg.train_grad,
++        ).to(self.device)
++
++        ot_cfg = cfg.OTPCLIP.OT
++        self.ot_filter = OTFilter()
++        self.ot_filter.cfg.sinkhorn_iter = ot_cfg.sinkhorn_iter
++        self.ot_filter.cfg.tau_clean = ot_cfg.tau_clean
++        self.ot_filter.cfg.temperature = ot_cfg.temperature
++        self.ot_filter.cfg.epsilon = ot_cfg.epsilon
++
++        self.loss_weights = dict(cfg.OTPCLIP.LOSS_WEIGHTS)
++        self.temperature = cfg.OTPCLIP.get("tau", 0.01)
++        self.robust = cfg.OTPCLIP.get("robust", "mae")
++
++    def before_train(self):
++        super().before_train()
++        attr_bank_path = self.cfg.TRAINER.OTPCLIP.get("attr_bank")
++        self.attr_bank = load_attr_bank(attr_bank_path)
++        self.text_features = None
++
++    def build_text_features(self):
++        class_embeddings = {}
++        for idx, classname in enumerate(self.dm.dataset.classnames):
++            class_embeddings[classname] = self.model.token_embedding(
++                self.dm.texts[idx]
++            )
++        ctx = self.oprompt(class_embeddings)
++        ctx_tilde, noise_reg = self.prompt_noise(ctx)
++        self.text_features = F.normalize(ctx_tilde.mean(dim=1), dim=-1)
++        self.noise_reg = noise_reg
++
++    def forward_backward(self, batch):
++        images, labels = self.parse_batch_train(batch)
++        if self.text_features is None:
++            self.build_text_features()
++
++        feats = self.model.encode_image(images)
++        feats = F.normalize(feats, dim=-1)
++        feats = feats.view(feats.size(0), 1, -1)
++        proto, weights = self.mta(feats)
++        sim = proto @ self.text_features.t()
++        clean_mask, conf, ot_loss = self.ot_filter(sim)
++        logits = sim / self.temperature
++
++        loss, loss_metrics = compose_losses(
++            logits,
++            labels,
++            clean_mask,
++            ot_loss,
++            loss_weights=self.loss_weights,
++            reg_terms=[self.oprompt.regularization(), self.noise_reg],
++            robust_type=self.robust,
++        )
++        self.model_backward_and_update(loss)
++
++        metrics = topk_accuracy(logits, labels, topk=(1,))
++        metrics["ece"] = expected_calibration_error(logits, labels)
++        metrics["brier"] = brier_score(logits, labels)
++        metrics.update(loss_metrics)
++        metrics["ot/conf_mean"] = float(conf.mean().detach().cpu())
++        for name, value in metrics.items():
++            self.write_scalar(name, value, self.iter)
++
++    def model_inference(self, image):
++        feat = self.model.encode_image(image)
++        feat = F.normalize(feat, dim=-1)
++        sim = feat @ self.text_features.t()
++        return sim / self.temperature
++
++
++__all__ = ["OTPCLIPTrainer"]
+diff --git a/nlprompt/utils/__init__.py b/nlprompt/utils/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e87d5bb90d015a74765995c68990067ef53c4c1
+--- /dev/null
++++ b/nlprompt/utils/__init__.py
+@@ -0,0 +1,9 @@
++"""Utility helpers for OTP-CLIP."""
++
++from .metrics import MetricCollection
++from .viz import save_histogram
++
++__all__ = [
++    "MetricCollection",
++    "save_histogram",
++]
+diff --git a/nlprompt/utils/metrics.py b/nlprompt/utils/metrics.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b596f543a78e440f3ea6d112f61f98fe05cbd1af
+--- /dev/null
++++ b/nlprompt/utils/metrics.py
+@@ -0,0 +1,55 @@
++"""Metrics helpers for OTP-CLIP."""
++
++from __future__ import annotations
++
++from typing import Dict, Iterable
++
++import torch
++import torch.nn.functional as F
++
++
++class MetricCollection:
++    def __init__(self) -> None:
++        self.storage: Dict[str, torch.Tensor] = {}
++
++    def update(self, name: str, value: torch.Tensor) -> None:
++        self.storage[name] = value.detach()
++
++    def compute(self) -> Dict[str, float]:
++        return {k: float(v.mean().cpu()) for k, v in self.storage.items()}
++
++
++def topk_accuracy(logits: torch.Tensor, target: torch.Tensor, topk: Iterable[int] = (1,)) -> Dict[str, float]:
++    maxk = max(topk)
++    _, pred = logits.topk(maxk, dim=1, largest=True, sorted=True)
++    pred = pred.t()
++    correct = pred.eq(target.view(1, -1).expand_as(pred))
++    res = {}
++    for k in topk:
++        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
++        res[f"acc@{k}"] = float(correct_k.mul_(1.0 / target.size(0)))
++    return res
++
++
++def expected_calibration_error(logits: torch.Tensor, target: torch.Tensor, n_bins: int = 15) -> float:
++    probs = F.softmax(logits, dim=-1)
++    confidences, predictions = probs.max(dim=1)
++    accuracies = predictions.eq(target)
++    bins = torch.linspace(0, 1, n_bins + 1, device=logits.device)
++    ece = torch.zeros(1, device=logits.device)
++    for i in range(n_bins):
++        mask = (confidences > bins[i]) & (confidences <= bins[i + 1])
++        if mask.any():
++            acc = accuracies[mask].float().mean()
++            conf = confidences[mask].mean()
++            ece += (mask.float().mean()) * torch.abs(acc - conf)
++    return float(ece.cpu())
++
++
++def brier_score(logits: torch.Tensor, target: torch.Tensor) -> float:
++    probs = F.softmax(logits, dim=-1)
++    y = F.one_hot(target, logits.size(-1)).float()
++    return float(torch.mean((probs - y).pow(2)).cpu())
++
++
++__all__ = ["MetricCollection", "topk_accuracy", "expected_calibration_error", "brier_score"]
+diff --git a/nlprompt/utils/viz.py b/nlprompt/utils/viz.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..da349dbb18e5b478d7af9bbcbd39d9e4992a6248
+--- /dev/null
++++ b/nlprompt/utils/viz.py
+@@ -0,0 +1,23 @@
++"""Visualization helpers (light-weight stubs)."""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Iterable
++
++import matplotlib.pyplot as plt
++import torch
++
++
++def save_histogram(values: torch.Tensor, path: str | Path, title: str) -> None:
++    path = Path(path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    values = values.detach().cpu().numpy()
++    plt.figure()
++    plt.hist(values, bins=20)
++    plt.title(title)
++    plt.savefig(path)
++    plt.close()
++
++
++__all__ = ["save_histogram"]
+diff --git a/train.py b/train.py
+index 714897bbf1d5bf2e3c7ace9eff1b0f698a802038..2b98a8f7ac58f27e859fa1a442f24cf8e6726e93 100644
+--- a/train.py
++++ b/train.py
+@@ -90,50 +90,89 @@ def extend_cfg(cfg):
+     cfg.TRAINER.NLPROMPT = CN()
+     cfg.TRAINER.NLPROMPT.N_CTX = 16  # number of context vectors
+     cfg.TRAINER.NLPROMPT.CSC = False  # class-specific context
+     cfg.TRAINER.NLPROMPT.CTX_INIT = ""  # initialization words
+     cfg.TRAINER.NLPROMPT.PREC = "fp16"  # fp16, fp32, amp
+     cfg.TRAINER.NLPROMPT.CLASS_TOKEN_POSITION = "end"  # 'middle' or 'end' or 'front'
+     cfg.DATASET.SUBSAMPLE_CLASSES = "all"
+ 
+     cfg.DATASET.NUM_SHOTS = 16
+     # Config for noise 
+     cfg.DATASET.NOISE_LABEL = True
+     cfg.DATASET.NOISE_RATE = 0.5
+     cfg.DATASET.NOISE_TYPE = 'sym'
+     cfg.DATASET.num_class = 100
+ 
+     #config for ot
+     cfg.DATASET.USE_OT = True
+     cfg.DATASET.REG_FEAT = 1.0
+     cfg.DATASET.REG_LAB = 1.0
+     cfg.DATASET.CURRICLUM_EPOCH = 0
+     cfg.DATASET.BEGIN_RATE = 0.3
+     cfg.DATASET.CURRICLUM_MODE = 'linear'
+     cfg.DATASET.PMODE = 'logP'
+     cfg.DATASET.REG_E = 0.01
+ 
++    # OTP-CLIP specific configuration tree
++    cfg.TRAINER.OTPCLIP = CN()
++    cfg.TRAINER.OTPCLIP.attr_bank = "alpha.json"
++    cfg.TRAINER.OTPCLIP.tau = 0.01
++    cfg.TRAINER.OTPCLIP.robust = "mae"
++
++    cfg.TRAINER.OTPCLIP.PROMPT = CN()
++    cfg.TRAINER.OTPCLIP.PROMPT.n_ctx = 16
++    cfg.TRAINER.OTPCLIP.PROMPT.sparsity_lambda = 1e-3
++    cfg.TRAINER.OTPCLIP.PROMPT.group_lambda = 5e-4
++    cfg.TRAINER.OTPCLIP.PROMPT.orth_lambda = 1e-2
++    cfg.TRAINER.OTPCLIP.PROMPT.norm = "row_l1"
++
++    cfg.TRAINER.OTPCLIP.PROMPT_NOISE = CN()
++    cfg.TRAINER.OTPCLIP.PROMPT_NOISE.granularity = "token"
++    cfg.TRAINER.OTPCLIP.PROMPT_NOISE.s_init = 0.05
++    cfg.TRAINER.OTPCLIP.PROMPT_NOISE.t_init = 0.02
++    cfg.TRAINER.OTPCLIP.PROMPT_NOISE.kl_lambda = 1e-3
++    cfg.TRAINER.OTPCLIP.PROMPT_NOISE.anneal = CN(new_allowed=True)
++
++    cfg.TRAINER.OTPCLIP.MTA = CN()
++    cfg.TRAINER.OTPCLIP.MTA.h = 0.7
++    cfg.TRAINER.OTPCLIP.MTA.T = 7
++    cfg.TRAINER.OTPCLIP.MTA.lam = 0.1
++    cfg.TRAINER.OTPCLIP.MTA.entropy = True
++    cfg.TRAINER.OTPCLIP.MTA.train_grad = False
++
++    cfg.TRAINER.OTPCLIP.OT = CN()
++    cfg.TRAINER.OTPCLIP.OT.sinkhorn_iter = 30
++    cfg.TRAINER.OTPCLIP.OT.tau_clean = 0.55
++    cfg.TRAINER.OTPCLIP.OT.temperature = 0.07
++    cfg.TRAINER.OTPCLIP.OT.epsilon = 0.1
++
++    cfg.TRAINER.OTPCLIP.LOSS_WEIGHTS = CN()
++    cfg.TRAINER.OTPCLIP.LOSS_WEIGHTS.ce = 1.0
++    cfg.TRAINER.OTPCLIP.LOSS_WEIGHTS.robust = 0.5
++    cfg.TRAINER.OTPCLIP.LOSS_WEIGHTS.ot = 0.2
++    cfg.TRAINER.OTPCLIP.LOSS_WEIGHTS.reg = 1.0
++
+ 
+ def setup_cfg(args):
+     cfg = get_cfg_default()
+     extend_cfg(cfg)
+ 
+     # 1. From the dataset config file
+     if args.dataset_config_file:
+         cfg.merge_from_file(args.dataset_config_file)
+ 
+     # 2. From the method config file
+     if args.config_file:
+         cfg.merge_from_file(args.config_file)
+ 
+     # 3. From input arguments
+     reset_cfg(cfg, args)
+ 
+     # 4. From optional input arguments
+     cfg.merge_from_list(args.opts)
+ 
+     cfg.freeze()
+ 
+     return cfg
+ 
+ 
+ def main(args):
+diff --git a/trainers/__init__.py b/trainers/__init__.py
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..aee18209f587bbf1ec3f861e6d9c095f93f483c9 100644
+--- a/trainers/__init__.py
++++ b/trainers/__init__.py
+@@ -0,0 +1,2 @@
++from .nlprompt import *  # noqa: F401,F403
++from nlprompt.trainers.otpclip_trainer import OTPCLIPTrainer  # noqa: F401
