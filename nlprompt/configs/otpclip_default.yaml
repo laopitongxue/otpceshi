@@ -1,0 +1,41 @@
+seed: 42
+device: "cuda"
+fp16: true
+
+trainer:
+  otpclip:
+    attr_bank: "data/attributes/alpha.json"
+    class_template: "a photo of a {}."
+    prompt:
+      n_ctx: 16
+      sparsity_lambda: 1.0e-3
+      group_lambda: 5.0e-4
+      orth_lambda: 1.0e-2
+      norm: "row_l1"
+    prompt_noise:
+      granularity: "token"
+      s_init: 0.05
+      t_init: 0.02
+      kl_lambda: 0.001
+      anneal_start: 0
+      anneal_end: 15
+      cap_sigma: 0.08
+    mta:
+      V: 4
+      h: 0.7
+      T: 7
+      lambda_: 0.1
+      entropy: true
+      train_grad: false
+    ot:
+      sinkhorn_iter: 30
+      tau_clean: 0.55
+      temperature: 0.07
+    tau: 0.01
+    robust: "mae"
+    loss_weights:
+      ce: 1.0
+      robust: 0.5
+      ot: 0.2
+      prompt_reg: 1.0
+      noise_reg: 1.0

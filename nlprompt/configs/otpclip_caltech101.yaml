@@ -1,0 +1,24 @@
+_base_: otpclip_default.yaml
+
+data:
+  name: "Caltech101"
+  root: "/data/caltech101"
+  few_shot_k: 16
+  num_workers: 8
+  batch_size: 64
+  num_views: 4
+
+model:
+  clip_variant: "ViT-B/16"
+
+train:
+  epochs: 50
+  optimizer: "adamw"
+  lr_prompt: 2.0e-5
+  lr_backbone: 5.0e-6
+  weight_decay: 0.02
+  warmup_epochs: 2
+  ema_decay: 0.999
+
+eval:
+  metrics: ["top1", "ece", "brier", "nll", "drift"]
