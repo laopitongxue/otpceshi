@@ -4,6 +4,7 @@ import torch
 from dassl.utils import setup_logger, set_random_seed, collect_env_info
 from dassl.config import clean_cfg, get_cfg_default
 from dassl.engine import build_trainer
+from yacs.config import CfgNode as CN
 
 
 def print_args(args, cfg):
@@ -53,17 +54,64 @@ def reset_cfg(cfg, args):
 
 
 def extend_cfg(cfg):
-    """
-    Add new config variables.
+    cfg.TRAINER.OTPCLIP = CN()
+    cfg.TRAINER.OTPCLIP.PREC = "amp"
 
-    E.g.
-        from yacs.config import CfgNode as CN
-        cfg.TRAINER.MY_MODEL = CN()
-        cfg.TRAINER.MY_MODEL.PARAM_A = 1.
-        cfg.TRAINER.MY_MODEL.PARAM_B = 0.5
-        cfg.TRAINER.MY_MODEL.PARAM_C = False
-    """
-    pass
+    if "NLPROMPT" not in cfg.TRAINER:
+        cfg.TRAINER.NLPROMPT = CN()
+    cfg.TRAINER.NLPROMPT.N_CTX = 16
+    cfg.TRAINER.NLPROMPT.CTX_INIT = ""
+    cfg.TRAINER.NLPROMPT.CSC = False
+    cfg.TRAINER.NLPROMPT.CLASS_TOKEN_POSITION = "end"
+    cfg.TRAINER.NLPROMPT.PREC = "fp32"
+
+    cfg.MODEL.ATTR_BANK = ""
+    cfg.MODEL.TAU = 0.07
+
+    cfg.MODEL.PROMPT = CN()
+    cfg.MODEL.PROMPT.N_CTX = 16
+    cfg.MODEL.PROMPT.SPARSE_LAMBDA = 0.0
+    cfg.MODEL.PROMPT.GROUP_LAMBDA = 0.0
+    cfg.MODEL.PROMPT.ORTH_LAMBDA = 0.0
+
+    cfg.MODEL.PROMPT_NOISE = CN()
+    cfg.MODEL.PROMPT_NOISE.GRANULARITY = "token"
+    cfg.MODEL.PROMPT_NOISE.S_INIT = 0.05
+    cfg.MODEL.PROMPT_NOISE.T_INIT = 0.02
+    cfg.MODEL.PROMPT_NOISE.KL_LAMBDA = 0.0
+    cfg.MODEL.PROMPT_NOISE.L1_LAMBDA = 0.0
+    cfg.MODEL.PROMPT_NOISE.ANNEAL = CN()
+    cfg.MODEL.PROMPT_NOISE.ANNEAL.START = 0.0
+    cfg.MODEL.PROMPT_NOISE.ANNEAL.END = 0.0
+    cfg.MODEL.PROMPT_NOISE.CAP_SIGMA = 0.1
+
+    cfg.MODEL.MTA = CN()
+    cfg.MODEL.MTA.H = 0.7
+    cfg.MODEL.MTA.T = 7
+    cfg.MODEL.MTA.LAMBDA = 0.0
+    cfg.MODEL.MTA.ENTROPY = True
+    cfg.MODEL.MTA.TRAIN_GRAD = False
+
+    cfg.MODEL.OT = CN()
+    cfg.MODEL.OT.SINKHORN = 30
+    cfg.MODEL.OT.TAU_CLEAN = 0.5
+    cfg.MODEL.OT.TEMP = 0.07
+
+    cfg.TRAIN.LR_PROMPT = 2e-5
+    cfg.TRAIN.LR_BACKBONE = 0.0
+
+    cfg.LOSS = CN()
+    cfg.LOSS.W = CN()
+    cfg.LOSS.W.CE = 1.0
+    cfg.LOSS.W.ROBUST = 0.0
+    cfg.LOSS.W.OT = 0.0
+    cfg.LOSS.W.PROMPT_REG = 0.0
+    cfg.LOSS.W.NOISE_REG = 0.0
+    cfg.LOSS.ROBUST_TYPE = "MAE"
+    cfg.LOSS.GCE_Q = 0.7
+
+    if "METRICS" not in cfg.TEST:
+        cfg.TEST.METRICS = []
 
 
 def setup_cfg(args):

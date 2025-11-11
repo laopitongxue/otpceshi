@@ -1,0 +1,76 @@
+TRAINER:
+  NAME: "OTPCLIPTrainer"
+  OTPCLIP:
+    PREC: "amp"
+
+DATASET:
+  NAME: "Caltech101"
+  ROOT: "/data/caltech101"
+  NUM_SHOTS: 16
+
+INPUT:
+  SIZE: [224, 224]
+
+DATALOADER:
+  NUM_WORKERS: 8
+  TRAIN_X:
+    BATCH_SIZE: 64
+  TEST:
+    BATCH_SIZE: 64
+
+MODEL:
+  BACKBONE:
+    NAME: "ViT-B/16"
+  ATTR_BANK: "otpclip/datasets/alpha.json"
+  TAU: 0.07
+  PROMPT:
+    N_CTX: 16
+    SPARSE_LAMBDA: 0.001
+    GROUP_LAMBDA: 0.0005
+    ORTH_LAMBDA: 0.01
+  PROMPT_NOISE:
+    GRANULARITY: "token"
+    S_INIT: 0.05
+    T_INIT: 0.02
+    KL_LAMBDA: 0.001
+    L1_LAMBDA: 0.0
+    ANNEAL:
+      START: 0
+      END: 15
+    CAP_SIGMA: 0.08
+  MTA:
+    H: 0.7
+    T: 7
+    LAMBDA: 0.1
+    ENTROPY: true
+    TRAIN_GRAD: false
+  OT:
+    SINKHORN: 30
+    TAU_CLEAN: 0.55
+    TEMP: 0.07
+
+OPTIM:
+  NAME: "adamw"
+  LR: 0.0005
+  WEIGHT_DECAY: 0.02
+  MAX_EPOCH: 50
+  WARMUP_EPOCH: 2
+
+TRAIN:
+  LR_PROMPT: 0.00002
+  LR_BACKBONE: 0.000005
+  PRINT_FREQ: 10
+
+LOSS:
+  W:
+    CE: 1.0
+    ROBUST: 0.5
+    OT: 0.2
+    PROMPT_REG: 1.0
+    NOISE_REG: 1.0
+  ROBUST_TYPE: "MAE"
+  GCE_Q: 0.7
+
+TEST:
+  METRICS: ["top1", "ece", "brier", "nll", "drift"]
+  SPLIT: "test"
